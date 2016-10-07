@@ -15,7 +15,13 @@
 
 namespace apriltags_ros{
 
-AprilTagDetector::AprilTagDetector(ros::NodeHandle& nh, ros::NodeHandle& pnh): it_(nh){
+AprilTagDetector::AprilTagDetector(ros::NodeHandle& nh, ros::NodeHandle& pnh){
+
+ fx = -1;
+ fy = -1;
+ px = -1;
+ py = -1;
+
   XmlRpc::XmlRpcValue april_tag_descriptions;
   if(!pnh.getParam("tag_descriptions", april_tag_descriptions)){
     ROS_WARN("No april tags specified");
@@ -31,6 +37,11 @@ AprilTagDetector::AprilTagDetector(ros::NodeHandle& nh, ros::NodeHandle& pnh): i
   if(!pnh.getParam("sensor_frame_id", sensor_frame_id_)){
     sensor_frame_id_ = "";
   }
+
+  if (!pnh.getParam("tf_prefix", tf_prefix_)){
+    tf_prefix_ = "";
+  }
+
 
   std::string tag_family;
   pnh.param<std::string>("tag_family", tag_family, "36h11");
@@ -59,8 +70,9 @@ AprilTagDetector::AprilTagDetector(ros::NodeHandle& nh, ros::NodeHandle& pnh): i
   }
 
   tag_detector_= boost::shared_ptr<AprilTags::TagDetector>(new AprilTags::TagDetector(*tag_codes));
-  image_sub_ = it_.subscribeCamera("image_rect", 1, &AprilTagDetector::imageCb, this);
-  image_pub_ = it_.advertise("tag_detections_image", 1);
+  image_sub_ = nh.subscribe("image_rect", 1, &AprilTagDetector::imagePicture, this);
+  cam_info_ = nh.subscribe("camera_info", 1, &AprilTagDetector::cam_info, this);
+  image_pub_ = nh.advertise<sensor_msgs::Image>("tag_detections_image", 1);
   detections_pub_ = nh.advertise<AprilTagDetectionArray>("tag_detections", 1);
   pose_pub_ = nh.advertise<geometry_msgs::PoseArray>("tag_detections_pose", 1);
 }
@@ -68,24 +80,8 @@ AprilTagDetector::~AprilTagDetector(){
   image_sub_.shutdown();
 }
 
-void AprilTagDetector::imageCb(const sensor_msgs::ImageConstPtr& msg, const sensor_msgs::CameraInfoConstPtr& cam_info){
-  cv_bridge::CvImagePtr cv_ptr;
-  try{
-    cv_ptr = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::BGR8);
-  }
-  catch (cv_bridge::Exception& e){
-    ROS_ERROR("cv_bridge exception: %s", e.what());
-    return;
-  }
-  cv::Mat gray;
-  cv::cvtColor(cv_ptr->image, gray, CV_BGR2GRAY);
-  std::vector<AprilTags::TagDetection>	detections = tag_detector_->extractTags(gray);
-  ROS_DEBUG("%d tag detected", (int)detections.size());
 
-  double fx;
-  double fy;
-  double px;
-  double py;
+void AprilTagDetector::cam_info(const sensor_msgs::CameraInfoConstPtr& cam_info){
   if (projected_optics_) {
     // use projected focal length and principal point
     // these are the correct values
@@ -100,6 +96,27 @@ void AprilTagDetector::imageCb(const sensor_msgs::ImageConstPtr& msg, const sens
     fy = cam_info->K[4];
     px = cam_info->K[2];
     py = cam_info->K[5];
+  }
+}
+
+void AprilTagDetector::imagePicture(const sensor_msgs::ImageConstPtr& msg){
+  cv_bridge::CvImagePtr cv_ptr;
+  try{
+    cv_ptr = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::BGR8);
+  }
+  catch (cv_bridge::Exception& e){
+    ROS_ERROR("cv_bridge exception: %s", e.what());
+    return;
+  }
+  cv::Mat gray;
+  cv::cvtColor(cv_ptr->image, gray, CV_BGR2GRAY);
+  std::vector<AprilTags::TagDetection>	detections = tag_detector_->extractTags(gray);
+  ROS_DEBUG("%d tag detected", (int)detections.size());
+
+  // Check if the camera info has been updated yet
+  if (fx ==-1 && fy ==-1 && px ==-1 && py ==-1){
+    ROS_WARN_THROTTLE(2.0, "Skipping Frame: Camera Info Not Yet Set");
+    return;
   }
 
   if(!sensor_frame_id_.empty())
@@ -142,7 +159,8 @@ void AprilTagDetector::imageCb(const sensor_msgs::ImageConstPtr& msg, const sens
 
     tf::Stamped<tf::Transform> tag_transform;
     tf::poseStampedMsgToTF(tag_pose, tag_transform);
-    tf_pub_.sendTransform(tf::StampedTransform(tag_transform, tag_transform.stamp_, tag_transform.frame_id_, description.frame_name()));
+    tf_pub_.sendTransform(tf::StampedTransform(tag_transform, tag_transform.stamp_, tag_transform.frame_id_, tf_prefix_ + description.frame_name()));
+
   }
   detections_pub_.publish(tag_detection_array);
   pose_pub_.publish(tag_pose_array);
